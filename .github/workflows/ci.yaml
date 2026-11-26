@@ -1,0 +1,67 @@
+# 📄 位置：ops-agent-code/.github/workflows/ci.yaml
+# 数据流转：代码 push -> 触发 Actions -> 构建 Docker 镜像 -> 推送到 Docker Hub -> 修改 manifests 仓库的 YAML
+
+name: Build and Push Agent Image
+
+#作用：触发条件。只有当你把代码 push 推送到 main 分支时，这个流水线才会启动。
+on:
+  push:
+    branches: [ "main" ] # 只有推送到 main 分支才触发
+
+#作用：定义一个名为 build-and-deploy 的任务，并指定 GitHub 给你分配一台最新的 Ubuntu 虚拟机来干活。
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    #作用：设置环境变量。从 GitHub 仓库的 Secrets（加密设置）中读取你的 Docker Hub 用户名，并拼出镜像名（比如 myssername/ops-agent）。这保证了账号密码不暴露在代码里。
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/ops-agent
+#构建镜像阶段      
+    steps:
+      #第一步，把当前仓库的代码拉取到这台虚拟机上。
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      #安装并配置高级版 Docker 构建工具（Buildx），支持多架构构建和缓存加速。
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      #登录 Docker Hub，为后面 push（推送）镜像做准备。这里用的是 Access Token（比直接用密码更安全）。
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      #TAG=${GITHUB_SHA::7}：截取本次 Git 提交哈希的前 7 位（比如 a1b2c3d）作为镜像的版本标签，保证每次构建出来的镜像版本都是唯一的。
+      #docker build...：使用你的 Dockerfile.agent 构建镜像。
+      #docker push...：把镜像推送到 Docker Hub。
+      #echo ...：把刚刚生成的 TAG 写入 GitHub 的环境变量，供后面的步骤使用。
+      - name: Build and push Docker image
+        # 数据流转：使用 Git 提交的短 SHA（如 a1b2c3d）作为镜像 Tag，确保版本唯一可追溯
+        run: |
+          TAG=${GITHUB_SHA::7}
+          docker build -t $IMAGE_NAME:$TAG -f Dockerfile.agent .
+          docker push $IMAGE_NAME:$TAG
+          echo "IMAGE_TAG=$TAG" >> $GITHUB_ENV
+
+      #这里是 GitOps 的核心设计。它并没有直接去连 K8s 集群，而是去克隆另一个专门放 K8s YAML 配置的仓库（ops-agent-manifests）。GITOPS_PAT 是你申请的权限令牌，允许这次操作向配置仓库提交代码。
+      - name: Checkout Manifests Repo
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ env.DOCKERHUB_USERNAME }}/ops-agent-manifests
+          token: ${{ secrets.GITOPS_PAT }} # 需要你在 GitHub 生成一个 Personal Access Token
+          path: manifests
+
+      #进入配置仓库，用 sed 命令把 05-agent.yaml 文件里的镜像标签，替换成刚刚构建的新标签。比如把 image: xxx/ops-agent:v1 换成 image: xxx/ops-agent:a1b2c3d。
+      - name: Update Image Tag in YAML
+        # 数据流转：进入 manifests 仓库，用 sed 替换 05-agent.yaml 里的镜像版本
+        run: |
+          cd manifests/k8s
+          sed -i "s|image: $IMAGE_NAME:.*|image: $IMAGE_NAME:${{ env.IMAGE_TAG }}|g" 05-agent.yaml
+          #伪装成机器人，把修改后的 YAML 文件 commit 并 push 回配置仓库。
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          git add 05-agent.yaml
+          git commit -m "chore: update image to ${{ env.IMAGE_TAG }}"
+          git push

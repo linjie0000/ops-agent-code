@@ -1,0 +1,7 @@
+# requirements-rag.txt — 模拟内部 RAG 服务依赖
+# 数据流转：Dockerfile.rag 安装此文件 → mock_rag_server 可导入 fastapi/pydantic/httpx
+
+fastapi==0.115.6          # 数据流转：提供 /v1/retrieve 和 /health 路由
+uvicorn[standard]==0.34.0 # 数据流转：ASGI server，监听 0.0.0.0:8100
+pydantic==2.10.4          # 数据流转：校验 RagQuery 入参、序列化 RagResult 出参
+httpx==0.28.1             # 数据流转：预留——未来 RAG_BACKEND=internal-platform 时用它调真实内部平台

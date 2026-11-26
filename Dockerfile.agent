@@ -1,0 +1,89 @@
+# Dockerfile.agent — Ops Agent 生产镜像
+# 数据流转：builder 装 Python 依赖 → runtime 拷成品 + 装沙盒 CLI → 非 root 启动 uvicorn
+# 目标：镜像 < 500MB，subprocess 白名单命令真实存在，容器逃逸影响面受控
+
+# 0. 声明一个名为 kubectl-src 的构建阶段，直接使用你本地的镜像
+FROM tencentcom/kubectl:latest AS kubectl-src
+
+# ============================================================
+# 阶段 1：builder — 只负责编译/安装 Python 依赖
+# ============================================================
+FROM python:3.12-slim AS builder
+WORKDIR /build
+
+# 数据流转：先拷 requirements 再 pip install，利用 layer cache
+# 代码变更不会触发依赖重装，只有 requirements.txt 变了才重建这一层
+COPY requirements.txt .
+
+# 数据流转：--user 装到 /root/.local，方便 runtime 阶段整目录拷贝
+# --no-cache-dir 不留 pip 缓存，builder 镜像体积无所谓但保持干净
+#--user 前缀是按“当前用户的家目录”
+#RUN pip install --no-cache-dir --user -r requirements.txt
+#（venv 自带的 python 有正确 sys.path），换用户、换 HOME 都不受影响。
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
+
+
+# ============================================================
+# 阶段 2：runtime — 最终镜像，不含 gcc/pip 缓存
+# ============================================================
+FROM python:3.12-slim AS runtime
+WORKDIR /app
+
+# 数据流转：安装沙盒 subprocess 白名单命令的真实二进制
+# 你的 ToolRegistry 白名单里如果有 kubectl/curl/jq/ps/ss/ip，这里必须装齐
+
+#python:3.12-slim，它底层是基于 Debian（或 Ubuntu）系统的，而在 Debian 系统里，包管理器叫 apt-get，不叫 yum。
+# 否则容器内 subprocess 会 FileNotFoundError，而本地开发时不会暴露这个问题
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl \
+      jq \
+      procps \
+      iproute2 \
+      ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# 数据流转：从 builder 拷贝已装好的 Python 包到 runtime 的 site-packages 路径
+# /root/.local 是 pip --user 的默认前缀，拷过来后 PYTHONPATH 能直接找到
+#PYTHONUNBUFFERED=1 让 Python 的 print 内容立刻输出到日志里，不会因为缓冲区卡住导致你看不到报错。
+#PYTHONDONTWRITEBYTECODE=1：不让 Python 在容器里生成 .pyc 缓存文件，保持环境干净。
+#COPY --from=builder /root/.local /root/.local
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# 数据流转：创建非 root 用户 agent(uid=1000)，后续所有进程以它运行
+# 限制容器逃逸后的权限面，同时满足 K8s securityContext runAsNonRoot 要求
+#这是安全红线。默认情况下，Docker 容器里的进程是 root 权限，如果大模型被骗，执行了恶意命令，黑客就能直接控制宿主机。
+RUN useradd -m -u 1000 -s /bin/bash agent
+
+# 数据流转：拷应用代码，chown 给 agent，避免运行时无写权限
+#这表示把当前目录下的所有文件都拷贝进容器，并赋予 agent 用户权限
+# 注意 .dockerignore 要排除 .git/__pycache__/agent_logs/chroma_data 等
+COPY --chown=agent:agent . .
+
+# 数据流转：下载 kubectl 二进制到 /usr/local/bin，供沙盒 subprocess 调用
+#ARG 定义了一个“变量”，这个变量只在构建镜像的过程中有效。
+#curl.exe -LO "https://ghproxy.cn/https://dl.k8s.io/release/v1.31.3/bin/linux/amd64/kubectl"
+#COPY --from=<镜像名>` **本地有镜像就直接用**，没有才去拉，不会联网下载
+COPY --from=kubectl-src /opt/bitnami/kubectl/bin/kubectl /usr/local/bin/kubectl
+RUN chmod 0755 /usr/local/bin/kubectl
+
+# 数据流转：切到非 root，之后 RUN/CMD 都以 agent 身份执行
+USER agent
+
+# 数据流转：健康探针，Compose healthcheck / K8s readinessProbe 复用
+# 用 python urllib 而非 curl，少一个运行时依赖，且不依赖 shell 行为
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=3).status==200 else 1)"
+
+
+
+
+EXPOSE 8000
+
+# 数据流转：uvicorn 监听 0.0.0.0，容器外才能通过端口映射访问
+# main:app 是你的 FastAPI 入口，/agent/run 和 /health 路由在 main.py 里注册
+#`CMD` 就是镜像的**默认启动命令**，容器每次启动都会执行它
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

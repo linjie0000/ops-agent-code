@@ -1,0 +1,96 @@
+# docker-compose.yml — Phase 17 Lesson 01（RAG 后端改为内部检索接口版）
+
+version: "3.9"
+
+services:
+  # ============================================================
+  # 服务 1：Ollama — 推理引擎（保持不变）
+  # 数据流转：Agent → http://ollama:11434 → 模型返回 token
+  # ============================================================
+  ollama:
+  #**会优先使用本地已经下载好的镜像**，不会重新去网上拉。
+    image: ollama/ollama:0.6.5
+    container_name: ops-agent-ollama
+    ports:
+      - "11435:11434"
+    volumes:
+      #- ollama_models:/root/.ollama
+      - C:/Users/EDY/.ollama/models:/root/.ollama/models
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+      - OLLAMA_NUM_PARALLEL=2
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+    restart: unless-stopped
+    networks: [agent-net]
+
+  # ============================================================
+  # 服务 2：RAG 检索服务（替代 ChromaDB）
+  # 数据流转：Agent → http://rag-service:8100/v1/retrieve → 返回知识文档
+  # ============================================================
+  rag-service:
+    build:
+      context: .                        # 告诉 Docker 在当前目录下找构建材料。
+      dockerfile: Dockerfile.rag        # 轻量镜像，只含 FastAPI + mock 逻辑（告诉 Compose：“请你去执行 Dockerfile.rag 这张图纸，把服务镜像造出来）
+    container_name: ops-agent-rag
+    ports:
+      - "8100:8100"                     # 暴露给宿主机调试用
+    environment:                        # 塞环境变量
+      - LOG_LEVEL=INFO
+      - RAG_BACKEND=mock                # 数据流转：生产切 internal-platform 时改这里
+    healthcheck:
+      test:  ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8100/health')"]
+      interval: 15s                     # 每隔 15 秒去敲一次集装箱里面的 8100 端口（请求 /health）
+      timeout: 5s                       # 单次检查的超时时间.Docker 去执行那个 curl 命令时，最多等 5 秒。如果 5 秒了接口还没响应，Docker 就判定“这次检查失败”。
+      retries: 5                        # 连续失败重试次数 Docker 每次检查如果失败了，不会立刻把容器标红。它会连续尝试 5 次。如果 5 次全部失败，容器的状态才会从 starting 变成 unhealthy。 
+      start_period: 10s                 # 启动宽限期 容器刚启动的前 10 秒，Docker 会让着它。这 10 秒内如果健康检查失败，Docker 会觉得“它还在启动中，正常”，不会算入失败次数。10 秒过后，才开始严格执行 retries 规则。
+    restart: unless-stopped             # 重启策略 只要容器不是因为你自己手动执行了 docker stop 或 docker compose down 而停止的，无论它是崩溃了、报错了、还是被系统 OOM（内存溢出）杀掉了，Docker 都会自动帮你重启它。
+    networks: [agent-net]               # 把这个容器塞进名叫 agent-net 的局域网
+ 
+  # ============================================================
+  # 服务 3：Ops Agent 主程序
+  # 数据流转：请求 → ReAct → ToolRegistry → 沙盒 / RAG → Ollama
+  # ============================================================
+  ops-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    container_name: ops-agent-core
+    ports:
+      - "8000:8000"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434/v1   # 数据流转：容器内服务名，非 localhost
+      - RAG_BASE_URL=http://rag-service:8100     # 数据流转：指向内部 RAG 服务名
+      - RAG_TIMEOUT=10
+      - LOG_LEVEL=INFO
+      - SANDBOX_TIMEOUT=30
+    volumes:
+      - ${HOME}/.kube/config:/home/agent/.kube/config:ro  # 数据流转：只读 kubeconfig 供沙盒 kubectl 用
+      - ./agent_logs:/app/logs                             # 数据流转：审计日志落盘宿主机
+    depends_on:                        # 声明"我依赖哪些服务"，写这段配置的那个服务，必须等 ollama 和 rag-service 两个服务通过健康检查（healthcheck）之后才会启动。
+      ollama:
+        condition: service_healthy     # 数据流转：Ollama 健康后启动 Agent，等对方健康检查通过（服务真正能干活了）
+      rag-service:
+        condition: service_healthy     # 数据流转：RAG 健康后启动 Agent，等对方健康检查通过（服务真正能干活了）
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks: [agent-net]
+
+#有了这个声明，你在上面的 ollama 服务配置里，就可以把 ollama_models 挂载到容器的 /root/.ollama 目录上。这样模型文件就存在了宿主机的 Docker 虚拟硬盘里，实现持久化。
+volumes:
+  ollama_models:   # 数据流转：模型权重持久化
+
+#这是 Docker 默认的网络驱动模式（桥接模式）。Docker 会在宿主机上虚拟出一个网桥，把加入这个网络的容器都连在一起。
+#自动 DNS 解析：在这个网络里的容器，可以直接用服务名互相访问。
+networks:
+  agent-net:
+    driver: bridge

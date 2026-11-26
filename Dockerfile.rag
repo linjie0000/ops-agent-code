@@ -1,0 +1,13 @@
+# Dockerfile.rag — 模拟内部 RAG 服务的极简镜像
+# 数据流转：拷代码 → 装 fastapi/uvicorn → 起服务，无编译依赖，秒级构建
+#一个轻量级的 Python 3.12 基础系统
+FROM python:3.12-slim
+WORKDIR /app
+COPY requirements-rag.txt .
+#--no-cache-dir 告诉 pip 不要把下载的安装包缓存到本地磁盘。在 Docker 构建中，镜像的每一层都会被保存下来。如果不加这个参数，你的镜像体积会白白多出几十甚至上百兆的垃圾缓存文件。
+RUN pip install --no-cache-dir -r requirements-rag.txt
+COPY rag_contract.py mock_rag_server.py ./
+EXPOSE 8100
+# 数据流转：uvicorn 监听 0.0.0.0，供 Compose 网络内其他服务访问，uvicorn（Python 的 Web 服务器）
+#加载代码：mock_rag_server:app 这个参数告诉 Uvicorn：“去当前目录下找 mock_rag_server.py 这个文件，然后把里面的 app 变量（也就是 app = FastAPI(...) 这个实例）给我加载到内存里。”
+CMD ["uvicorn", "mock_rag_server:app", "--host", "0.0.0.0", "--port", "8100"]

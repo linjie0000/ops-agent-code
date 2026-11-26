@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ops Agent 调试台</title>
+<style>
+  :root{
+    --bg:#0e1418; --bg2:#131c22; --panel:#17222a; --line:#24333d;
+    --txt:#dfe9ef; --dim:#8fa3ae; --accent:#2ec6a4; --accent2:#3aa0d8;
+    --user:#1d3a44; --err:#e2685f; --warn:#e0a84f;
+    --mono:ui-monospace,SFMono-Regular,"Cascadia Mono",Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:radial-gradient(1200px 600px at 15% -10%,#183039 0%,var(--bg) 55%);
+    color:var(--txt); font:14px/1.65 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    display:flex; flex-direction:column;
+  }
+  header{
+    display:flex; align-items:center; gap:12px; padding:10px 16px;
+    background:rgba(19,28,34,.86); border-bottom:1px solid var(--line);
+    backdrop-filter:blur(8px); flex-wrap:wrap;
+  }
+  .brand{display:flex; align-items:center; gap:8px; font-weight:600; letter-spacing:.3px}
+  .dot{width:9px; height:9px; border-radius:50%; background:#54636d; transition:.3s}
+  .dot.on{background:var(--accent); box-shadow:0 0 10px rgba(46,198,164,.7)}
+  .dot.off{background:var(--err); box-shadow:0 0 10px rgba(226,104,95,.6)}
+  .endpoint{display:flex; align-items:center; gap:6px; flex:1; min-width:260px}
+  .endpoint input{
+    flex:1; min-width:120px; background:var(--panel); border:1px solid var(--line);
+    color:var(--txt); padding:6px 10px; border-radius:7px; font-family:var(--mono); font-size:12.5px;
+  }
+  .endpoint input:focus{outline:none; border-color:var(--accent2)}
+  button{
+    background:var(--panel); color:var(--txt); border:1px solid var(--line);
+    padding:6px 12px; border-radius:7px; cursor:pointer; font-size:13px; transition:.15s;
+  }
+  button:hover{border-color:var(--accent2); color:#fff}
+  button.primary{background:var(--accent); border-color:transparent; color:#05221c; font-weight:600}
+  button.primary:hover{filter:brightness(1.08)}
+  button:disabled{opacity:.45; cursor:not-allowed}
+  #log{flex:1; overflow-y:auto; padding:20px 18px 8px; scroll-behavior:smooth}
+  .wrap{max-width:860px; margin:0 auto; display:flex; flex-direction:column; gap:16px}
+  .msg{display:flex; flex-direction:column; gap:6px; max-width:100%}
+  .msg.user{align-items:flex-end}
+  .role{font-size:11.5px; color:var(--dim); letter-spacing:1px; text-transform:uppercase}
+  .bubble{
+    padding:12px 15px; border-radius:12px; border:1px solid var(--line);
+    background:var(--panel); max-width:100%; overflow-wrap:anywhere;
+  }
+  .msg.user .bubble{background:var(--user); border-color:#2a4f5c; border-bottom-right-radius:4px}
+  .msg.bot .bubble{border-bottom-left-radius:4px}
+  .bubble pre{
+    margin:8px 0; padding:11px 13px; background:#0b1216; border:1px solid var(--line);
+    border-radius:8px; overflow-x:auto; font-family:var(--mono); font-size:12.5px; line-height:1.55;
+  }
+  .bubble code{font-family:var(--mono); font-size:12.5px; background:#0b1216; padding:1px 5px; border-radius:4px}
+  .bubble h1,.bubble h2,.bubble h3{margin:14px 0 6px; font-size:15px; color:#fff}
+  .bubble ul{margin:6px 0; padding-left:20px}
+  .bubble li{margin:3px 0}
+  .meta{display:flex; gap:8px; flex-wrap:wrap; font-size:11.5px; color:var(--dim); font-family:var(--mono)}
+  .chip{padding:1px 7px; border:1px solid var(--line); border-radius:20px; background:#121b21}
+  .chip.ok{color:var(--accent); border-color:rgba(46,198,164,.35)}
+  .chip.bad{color:var(--err); border-color:rgba(226,104,95,.35)}
+  details.raw{margin-top:10px}
+  details.raw summary{cursor:pointer; color:var(--dim); font-size:12px; user-select:none}
+  details.raw summary:hover{color:var(--accent2)}
+  .tools{display:flex; gap:8px; margin-top:8px; flex-wrap:wrap}
+  .tools button{padding:3px 9px; font-size:12px; color:var(--dim)}
+  .thinking{display:flex; align-items:center; gap:10px; color:var(--dim); font-size:13px}
+  .bars{display:inline-flex; gap:4px}
+  .bars i{width:4px; height:14px; background:var(--accent2); border-radius:2px; animation:bl 1s infinite ease-in-out}
+  .bars i:nth-child(2){animation-delay:.15s}
+  .bars i:nth-child(3){animation-delay:.3s}
+  @keyframes bl{0%,100%{opacity:.25; transform:scaleY(.6)}50%{opacity:1; transform:scaleY(1)}}
+  footer{
+    padding:12px 16px 16px; border-top:1px solid var(--line); background:rgba(19,28,34,.9);
+  }
+  .composer{max-width:860px; margin:0 auto}
+  .presets{display:flex; gap:8px; margin-bottom:8px; flex-wrap:wrap}
+  .presets button{font-size:12px; color:var(--dim); padding:4px 10px}
+  .inputrow{display:flex; gap:10px; align-items:flex-end}
+  textarea{
+    flex:1; resize:none; min-height:52px; max-height:180px; padding:12px 14px;
+    background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    color:var(--txt); font:inherit; line-height:1.5;
+  }
+  textarea:focus{outline:none; border-color:var(--accent2); box-shadow:0 0 0 3px rgba(58,160,216,.12)}
+  .hint{font-size:11.5px; color:#6c808c; margin-top:6px; text-align:center}
+  .errbox{border-color:rgba(226,104,95,.5); background:#241618}
+  .empty{color:var(--dim); text-align:center; padding:60px 20px; font-size:13px; line-height:1.9}
+  ::-webkit-scrollbar{width:9px; height:9px}
+  ::-webkit-scrollbar-thumb{background:#2b3d48; border-radius:6px}
+  ::-webkit-scrollbar-track{background:transparent}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><span class="dot" id="hdot"></span>Ops Agent 调试台</div>
+  <div class="endpoint">
+    <span style="font-size:12px;color:var(--dim)">BASE</span>
+    <input id="base" placeholder="http://localhost:8000" autocomplete="off" spellcheck="false">
+    <button id="pingBtn" title="检测 /health">探活</button>
+  </div>
+  <button id="clearBtn">清空会话</button>
+</header>
+
+<div id="log"><div class="wrap" id="msgs">
+  <div class="empty" id="emptyBox">
+    在下方输入一条运维任务，回车发送。<br>
+    接口：<span style="font-family:var(--mono);color:var(--accent2)">POST /agent/run</span> &nbsp;·&nbsp; body: <span style="font-family:var(--mono)">{"task": "..."}</span>
+  </div>
+</div></div>
+
+<footer>
+  <div class="composer">
+    <div class="presets">
+      <button data-t="生产环境 web-01 节点 CPU 飙升到 98%，请按照 SOP 排查原因并给出建议。">CPU 飙高排查</button>
+      <button data-t="检查 web-02 的磁盘使用率，若超过 85% 请定位大文件并给出清理建议。">磁盘告警</button>
+      <button data-t="过去 5 分钟内 502 错误激增，请检查后端服务与上游网关状态。">502 错误</button>
+      <button data-t="列出当前集群中处于 CrashLoopBackOff 状态的 Pod 并说明可能原因。">Pod 异常</button>
+    </div>
+    <div class="inputrow">
+      <textarea id="task" placeholder="描述要排查的问题…（Enter 发送 / Shift+Enter 换行）"></textarea>
+      <button class="primary" id="sendBtn">发送</button>
+      <button id="stopBtn" style="display:none">停止</button>
+    </div>
+    <div class="hint">请求体仅含 task 字段；返回原始 JSON 可在消息下方展开查看</div>
+  </div>
+</footer>
+
+<script>
+(function(){
+  "use strict";
+
+  // ---------- 基础状态 ----------
+  const KEY = "ops-agent-debug-v1";
+  const saved = JSON.parse(localStorage.getItem(KEY) || "{}");
+  const defaultBase = saved.base !== undefined
+    ? saved.base
+    : (location.protocol.startsWith("http") ? "" : "http://localhost:8000");
+
+  const $ = id => document.getElementById(id);
+  const baseEl = $("base"), logEl = $("log"), msgsEl = $("msgs");
+  const emptyBox = $("emptyBox"), taskEl = $("task");
+  const sendBtn = $("sendBtn"), stopBtn = $("stopBtn"), hdot = $("hdot");
+  let abortCtrl = null;
+
+  baseEl.value = defaultBase;
+  baseEl.addEventListener("change", () => {
+    saved.base = baseEl.value.trim();
+    localStorage.setItem(KEY, JSON.stringify(saved));
+  });
+
+  // ---------- 工具 ----------
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+  const fmtMs = ms => ms < 1000 ? ms + " ms" : (ms/1000).toFixed(1) + " s";
+  const url = p => (baseEl.value.trim().replace(/\/+$/,"") || "") + p;
+
+  // 轻量 markdown：代码块 / 行内代码 / 加粗 / 标题 / 列表
+  function md(text){
+    const blocks = [];
+    text = String(text).replace(/```(\w*)\n?([\s\S]*?)```/g, (m, lang, code) => {
+      blocks.push('<pre><code>' + esc(code.replace(/\n$/,"")) + '</code></pre>');
+      return "\u0000" + (blocks.length - 1) + "\u0000";
+    });
+    let html = esc(text)
+      .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+      .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
+      .replace(/^### (.+)$/gm, "<h3>$1</h3>")
+      .replace(/^## (.+)$/gm, "<h2>$1</h2>")
+      .replace(/^# (.+)$/gm, "<h3>$1</h3>")
+      .replace(/^\s*[-*] (.+)$/gm, "<li>$1</li>")
+      .replace(/(<li>[\s\S]*?<\/li>)(?!\s*<li>)/g, "<ul>$1</ul>")
+      .replace(/\n{2,}/g, "<br><br>")
+      .replace(/\n/g, "<br>");
+    html = html.replace(/\u0000(\d+)\u0000/g, (m, i) => blocks[+i]);
+    // 列表里多余的 <br> 清理
+    html = html.replace(/<ul>([\s\S]*?)<\/ul>/g, (m, inner) => "<ul>" + inner.replace(/<br>/g,"") + "</ul>");
+    return html;
+  }
+
+  // 从任意结构里找"人类可读答案"
+  const ANSWER_KEYS = ["answer","result","output","content","message","response","text","reply","summary","final","data"];
+  function digAnswer(obj, depth){
+    depth = depth || 0;
+    if (depth > 4 || obj == null) return null;
+    if (typeof obj === "string") return obj.trim() ? obj : null;
+    if (Array.isArray(obj)) {
+      for (const it of obj) { const r = digAnswer(it, depth+1); if (r) return r; }
+      return null;
+    }
+    if (typeof obj === "object") {
+      for (const k of ANSWER_KEYS) {
+        if (k in obj) { const r = digAnswer(obj[k], depth+1); if (r) return r; }
+      }
+      for (const k in obj) { const r = digAnswer(obj[k], depth+1); if (r) return r; }
+    }
+    return null;
+  }
+
+  function pick(obj, keys){
+    for (const k of keys) if (obj && typeof obj === "object" && obj[k] != null && obj[k] !== "") return obj[k];
+    return null;
+  }
+
+  // ---------- 渲染 ----------
+  function clearEmpty(){ if (emptyBox && emptyBox.parentNode) emptyBox.remove(); }
+
+  function addMsg(role, html, meta, raw){
+    clearEmpty();
+    const wrap = document.createElement("div");
+    wrap.className = "msg " + role;
+    wrap.innerHTML =
+      '<div class="role">' + (role === "user" ? "OPERATOR" : "AGENT") + '</div>' +
+      '<div class="bubble">' + html + '</div>' +
+      (meta ? '<div class="meta">' + meta + '</div>' : '');
+    if (raw != null) {
+      const d = document.createElement("details");
+      d.className = "raw";
+      d.innerHTML = '<summary>原始 JSON</summary><pre>' + esc(JSON.stringify(raw, null, 2)) + '</pre>';
+      wrap.querySelector(".bubble").appendChild(d);
+    }
+    msgsEl.appendChild(wrap);
+    logEl.scrollTop = logEl.scrollHeight;
+    return wrap;
+  }
+
+  function addLoading(){
+    clearEmpty();
+    const wrap = document.createElement("div");
+    wrap.className = "msg bot";
+    wrap.id = "loading";
+    wrap.innerHTML = '<div class="role">AGENT</div><div class="bubble">' +
+      '<div class="thinking"><span class="bars"><i></i><i></i><i></i></span>' +
+      '<span id="elapsed">执行中… 0.0s</span></div></div>';
+    msgsEl.appendChild(wrap);
+    logEl.scrollTop = logEl.scrollHeight;
+    return { el: wrap, start: performance.now() };
+  }
+
+  function killLoading(){ const l = $("loading"); if (l) l.remove(); }
+
+  function curlFor(task){
+    return "curl -s -X POST " + url("/agent/run") +
+      " -H \"Content-Type: application/json; charset=utf-8\"" +
+      " --data-binary @req.json";
+  }
+
+  // ---------- 探活 ----------
+  async function ping(){
+    hdot.className = "dot";
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 4000);
+      const r = await fetch(url("/health"), { signal: ctrl.signal });
+      clearTimeout(t);
+      hdot.className = "dot " + (r.ok ? "on" : "off");
+      return r.ok;
+    } catch(e) {
+      hdot.className = "dot off";
+      return false;
+    }
+  }
+  $("pingBtn").addEventListener("click", async () => {
+    const ok = await ping();
+    addMsg("bot", ok ? "健康检查通过：<code>GET /health</code> 返回 2xx" : "健康检查失败：无法连通 <code>/health</code>，确认服务已启动且 BASE 正确",
+      '<span class="chip ' + (ok ? "ok" : "bad") + '">' + (ok ? "HEALTHY" : "UNREACHABLE") + "</span>");
+  });
+
+  // ---------- 发送 ----------
+  async function send(){
+    const task = taskEl.value.trim();
+    if (!task || sendBtn.disabled) return;
+
+    addMsg("user", md(task));
+    taskEl.value = "";
+    autoGrow();
+
+    sendBtn.disabled = true;
+    stopBtn.style.display = "";
+    const ld = addLoading();
+    const timer = setInterval(() => {
+      const el = $("elapsed");
+      if (el) el.textContent = "执行中… " + fmtMs(Math.round(performance.now() - ld.start));
+    }, 100);
+
+    abortCtrl = new AbortController();
+    const t0 = performance.now();
+
+    try {
+      const resp = await fetch(url("/agent/run"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify({ task }),
+        signal: abortCtrl.signal
+      });
+
+      const ms = Math.round(performance.now() - t0);
+      const text = await resp.text();
+      let data; try { data = JSON.parse(text); } catch(e) { data = null; }
+
+      clearInterval(timer); killLoading();
+
+      if (!resp.ok) {
+        const detail = data ? JSON.stringify(data.detail ?? data, null, 2) : text.slice(0, 1200);
+        addMsg("bot",
+          '<div style="color:var(--err);font-weight:600;margin-bottom:6px">HTTP ' + resp.status + ' ' + esc(resp.statusText) + '</div>' +
+          '<pre>' + esc(detail) + '</pre>' +
+          '<div style="color:var(--dim);font-size:12px;margin-top:8px">' +
+          (resp.status === 422 ? "422 通常是 body 结构不对：确认字段名是 task，且 JSON 合法。" : "检查服务端日志：docker compose logs -f ops-agent") +
+          '</div>',
+          '<span class="chip bad">' + resp.status + '</span><span class="chip">' + fmtMs(ms) + '</span>',
+          data);
+        return;
+      }
+
+      const answer = data != null ? (digAnswer(data) || "") : text;
+      const meta = ['<span class="chip ok">200</span>', '<span class="chip">' + fmtMs(ms) + '</span>'];
+      const tid = data && pick(data, ["task_id","id","request_id","trace_id"]);
+      if (tid) meta.push('<span class="chip">id ' + esc(tid) + '</span>');
+      const model = data && pick(data, ["model","model_name"]);
+      if (model) meta.push('<span class="chip">' + esc(model) + '</span>');
+
+      const tools = '<div class="tools">' +
+        '<button data-act="copy">复制正文</button>' +
+        '<button data-act="curl">复制 curl</button>' +
+        '</div>';
+
+      const node = addMsg("bot",
+        (answer ? md(answer) : '<span style="color:var(--dim)">返回体中没有找到可读文本，请展开原始 JSON 查看</span>') + tools,
+        meta.join(""),
+        data != null ? data : text
+      );
+
+      node.querySelector('[data-act="copy"]').onclick = () => {
+        navigator.clipboard.writeText(answer || text).then(
+          e => flash(node, "已复制正文"), e => flash(node, "复制失败"));
+      };
+      node.querySelector('[data-act="curl"]').onclick = () => {
+        navigator.clipboard.writeText(curlFor(task)).then(
+          e => flash(node, "已复制 curl"), e => flash(node, "复制失败"));
+      };
+
+    } catch(e) {
+      clearInterval(timer); killLoading();
+      if (e.name === "AbortError") {
+        addMsg("bot", '<span style="color:var(--warn)">已手动中止请求</span>',
+          '<span class="chip">ABORTED</span>');
+      } else {
+        addMsg("bot",
+          '<div style="color:var(--err);font-weight:600;margin-bottom:6px">请求未发出或连接失败</div>' +
+          '<pre>' + esc(e.message) + '</pre>' +
+          '<div style="color:var(--dim);font-size:12px;margin-top:8px">' +
+          '常见原因：服务未启动 / BASE 填错 / 跨域被拦截（用 <code>file://</code> 直接打开时需后端开启 CORS，建议通过 <code>http://localhost:8000/debug/</code> 访问）' +
+          '</div>',
+          '<span class="chip bad">NETWORK</span>');
+      }
+    } finally {
+      sendBtn.disabled = false;
+      stopBtn.style.display = "none";
+      abortCtrl = null;
+      ping();
+    }
+  }
+
+  function flash(node, msg){
+    const t = document.createElement("div");
+    t.className = "meta";
+    t.style.color = "var(--accent)";
+    t.textContent = msg;
+    node.appendChild(t);
+    setTimeout(() => t.remove(), 1600);
+  }
+
+  // ---------- 输入区交互 ----------
+  function autoGrow(){
+    taskEl.style.height = "auto";
+    taskEl.style.height = Math.min(taskEl.scrollHeight, 180) + "px";
+  }
+  taskEl.addEventListener("input", autoGrow);
+  taskEl.addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+  sendBtn.addEventListener("click", send);
+  stopBtn.addEventListener("click", () => { if (abortCtrl) abortCtrl.abort(); });
+
+  document.querySelectorAll(".presets button").forEach(b => {
+    b.addEventListener("click", () => { taskEl.value = b.dataset.t; autoGrow(); taskEl.focus(); });
+  });
+
+  $("clearBtn").addEventListener("click", () => {
+    msgsEl.innerHTML = "";
+    msgsEl.appendChild(emptyBox);
+    emptyBox.style.display = "";
+  });
+
+  // 启动即探活，之后每 20s 一次
+  ping();
+  setInterval(ping, 20000);
+})();
+</script>
+</body>
+</html>

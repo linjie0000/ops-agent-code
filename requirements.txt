@@ -1,0 +1,6 @@
+# requirements.txt — Ops Agent 主程序依赖
+openai==1.59.7            # 数据流转：OpenAI 兼容客户端 → ollama:11434/v1
+httpx==0.28.1             # 数据流转：调 rag-service 的 HTTP 客户端
+pydantic==2.10.4          # 数据流转：ToolRegistry 校验、RAG 契约、请求模型
+fastapi==0.115.6          # 数据流转：/agent/run 与 /health 路由
+uvicorn[standard]==0.34.0 # 数据流转：Agent ASGI server
